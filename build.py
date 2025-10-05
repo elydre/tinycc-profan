@@ -61,8 +61,7 @@ def compile_tcc():
     archive_objs(objs, "libtcc")
 
     objs.append(compile_file("tcc.c"))
-    entry = compile_file("entry.c", ".")
-    link_to_exec(entry, objs, "tcc")
+    link_to_exec(f"{profan_path}/out/make/entry_elf.o", objs, "tcc")
 
 def compile_libtcc1():
     print("\n--- COMPILING LIBTCC1")
@@ -80,7 +79,7 @@ def compile_extra():
     execute_command(f"gcc -m32 src/tcc.c -o {OBJDIR}/tcc-i386")
 
     print("TCC -bt bcheck.c")
-    execute_command(f"./{OBJDIR}/tcc-i386 -I {profan_path}/include/zlibs -D__profanOS__ -nostdlib -B build -bt -c {LIB1DIR}/bcheck.c -o {OUTDIR}/bcheck.o")
+    execute_command(f"./{OBJDIR}/tcc-i386 -I {profan_path}/include/zlibs -I include -D__profanOS__ -nostdlib -B build -bt -c {LIB1DIR}/bcheck.c -o {OUTDIR}/bcheck.o")
 
     print("TAR === tccobjs.tar.gz")
     execute_command(f"cd {OUTDIR} && tar -czf tccobjs.tar.gz *.o")
