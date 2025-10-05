@@ -1,5 +1,6 @@
 #ifndef _STDDEF_H
 #define _STDDEF_H
+#define _TINYC_STDDEF
 
 typedef __SIZE_TYPE__ size_t;
 typedef __PTRDIFF_TYPE__ ssize_t;
@@ -17,7 +18,7 @@ typedef union { long long __ll; long double __ld; } max_align_t;
 #endif
 
 #undef offsetof
-#define offsetof(type, field) ((size_t)&((type *)0)->field)
+#define offsetof(type, field) __builtin_offsetof(type, field)
 
 #if defined __i386__ || defined __x86_64__
 void *alloca(size_t size);

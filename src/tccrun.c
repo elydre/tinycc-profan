@@ -221,7 +221,7 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
 
     tcc_add_symbol(s1, "__rt_exit", rt_exit);
     if (s1->nostdlib) {
-        s1->run_main = top_sym = "_start";
+        s1->run_main = top_sym = s1->elf_entryname ? s1->elf_entryname : "_start";
     } else {
         s1->run_main = top_sym = "main";
         tcc_add_support(s1, "runmain.o");
@@ -313,6 +313,7 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, unsigned ptr_diff)
     addr_t mem, addr;
 
     if (NULL == ptr) {
+        s1->nb_errors = 0;
 #ifdef TCC_TARGET_PE
         pe_output_file(s1, NULL);
 #else
@@ -422,7 +423,7 @@ redo:
     }
 
     /* relocate symbols */
-    relocate_syms(s1, s1->symtab, !(s1->nostdlib));
+    relocate_syms(s1, s1->symtab, 1);
     /* relocate sections */
 #ifdef TCC_TARGET_PE
     s1->pe_imagebase = mem;
@@ -500,8 +501,6 @@ static void bt_link(TCCState *s1)
 {
 #ifdef CONFIG_TCC_BACKTRACE
     rt_context *rc;
-    void *p;
-
     if (!s1->do_backtrace)
         return;
     rc = tcc_get_symbol(s1, "__rt_info");
@@ -514,6 +513,7 @@ static void bt_link(TCCState *s1)
         rc->prog_base &= 0xffffffff00000000ULL;
 #ifdef CONFIG_TCC_BCHECK
     if (s1->do_bounds_check) {
+        void *p;
         if ((p = tcc_get_symbol(s1, "__bound_init")))
             ((void(*)(void*,int))p)(rc->bounds_start, 1);
     }
@@ -602,6 +602,13 @@ static void rt_exit(rt_frame *f, int code)
     s = rt_find_state(f);
     rt_post_sem();
     if (s && s->run_lj) {
+#ifdef CONFIG_TCC_BCHECK
+        if (f->fp) { /* called from signal */
+            void *p = tcc_get_symbol(s, "__bound_exit");
+            if (p)
+                ((void (*)(void))p)();
+        }
+#endif
         if (code == 0)
             code = RT_EXIT_ZERO;
         ((void(*)(void*,int))s->run_lj)(s->run_jb, code);

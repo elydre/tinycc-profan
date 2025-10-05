@@ -54,7 +54,7 @@ static int ar_usage(int ret) {
     return ret;
 }
 
-ST_FUNC int tcc_tool_ar(TCCState *s1, int argc, char **argv)
+ST_FUNC int tcc_tool_ar(int argc, char **argv)
 {
     static const ArHdr arhdr_init = {
         "/               ",
@@ -360,7 +360,7 @@ the_end:
 
 #ifdef TCC_TARGET_PE
 
-ST_FUNC int tcc_tool_impdef(TCCState *s1, int argc, char **argv)
+ST_FUNC int tcc_tool_impdef(int argc, char **argv)
 {
     int ret, v, i;
     char infile[260];
@@ -487,9 +487,9 @@ the_end:
 
 #if !defined TCC_TARGET_I386 && !defined TCC_TARGET_X86_64
 
-ST_FUNC int tcc_tool_cross(TCCState *s1, char **argv, int option)
+ST_FUNC int tcc_tool_cross(char **argv, int option)
 {
-    tcc_error_noabort("-m%d not implemented.", option);
+    fprintf(stderr, "tcc -m%d not implemented\n", option);
     return 1;
 }
 
@@ -546,7 +546,7 @@ static int execvp_win32(const char *prog, char **argv)
 #define execvp execvp_win32
 #endif /* _WIN32 */
 
-ST_FUNC int tcc_tool_cross(TCCState *s1, char **argv, int target)
+ST_FUNC int tcc_tool_cross(char **argv, int target)
 {
     char program[4096];
     char *a0 = argv[0];
@@ -565,7 +565,7 @@ ST_FUNC int tcc_tool_cross(TCCState *s1, char **argv, int target)
 
     if (strcmp(a0, program))
         execvp(argv[0] = program, argv);
-    tcc_error_noabort("could not run '%s'", program);
+    fprintf(stderr, "tcc: could not run '%s'\n", program);
     return 1;
 }
 

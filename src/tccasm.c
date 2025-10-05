@@ -842,7 +842,7 @@ static void asm_parse_directive(TCCState *s1, int global)
 
             if (!strcmp(newtype, "function") || !strcmp(newtype, "STT_FUNC")) {
                 if (IS_ASM_SYM(sym))
-                    sym->type.t = (sym->type.t & ~VT_ASM) | VT_ASM_FUNC;
+                    sym->type.t |= VT_ASM_FUNC;
                 st_type = STT_FUNC;
             set_st_type:
                 if (sym->c) {
@@ -907,6 +907,10 @@ static void asm_parse_directive(TCCState *s1, int global)
 	       sets alignment to PTR_SIZE.  The assembler behaves different. */
 	    if (old_nb_section != s1->nb_sections) {
 	        cur_text_section->sh_addralign = 1;
+                /* Make .init and .fini sections executable by default.
+                   GAS does so, too, and musl relies on it. */
+                if (!strcmp(sname, ".init") || !strcmp(sname, ".fini"))
+                    flags |= SHF_EXECINSTR;
 	        cur_text_section->sh_flags = flags;
             }
         }

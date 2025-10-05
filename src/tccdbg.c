@@ -310,6 +310,14 @@ static const unsigned char dwarf_line_opcodes[] = {
 /* ------------------------------------------------------------------------- */
 /* debug state */
 
+#define N_STR_HASH (251)
+
+struct dwarf_str_hash {
+    int len;
+    unsigned long data_offset;
+    struct dwarf_str_hash *next;
+};
+
 struct _tccdbg {
 
     int last_line_num, new_file;
@@ -320,20 +328,25 @@ struct _tccdbg {
     struct _debug_hash {
         int debug_type;
         Sym *type;
-    } *debug_hash;
+    } *debug_hash_global, *debug_hash_local;
 
-    struct _debug_anon_hash {
+    /* store forward structure/unions types */
+    struct _debug_forw_hash {
         Sym *type;
         int n_debug_type;
         int *debug_type;
-    } *debug_anon_hash;
+    } *debug_forw_hash_global, *debug_forw_hash_local;
 
-    int n_debug_hash;
-    int n_debug_anon_hash;
+    int n_debug_hash_global;
+    int n_debug_hash_local;
+    int n_debug_forw_hash_global;
+    int n_debug_forw_hash_local;
 
     struct _debug_info {
         int start;
         int end;
+        int last_debug_hash;
+        int last_debug_forw_hash;
         int n_sym;
         struct debug_sym {
             int type;
@@ -381,6 +394,9 @@ struct _tccdbg {
         int base_type_used[N_DEFAULT_DEBUG];
     } dwarf_info;
 
+    struct dwarf_str_hash *dwarf_str[N_STR_HASH];
+    struct dwarf_str_hash *dwarf_line_str[N_STR_HASH];
+
     /* test coverage */
     struct {
         unsigned long offset;
@@ -389,23 +405,28 @@ struct _tccdbg {
         int ind;
         int line;
     } tcov_data;
-
 };
 
-#define last_line_num       s1->dState->last_line_num
-#define new_file            s1->dState->new_file
-#define section_sym         s1->dState->section_sym
-#define debug_next_type     s1->dState->debug_next_type
-#define debug_hash          s1->dState->debug_hash
-#define debug_anon_hash     s1->dState->debug_anon_hash
-#define n_debug_hash        s1->dState->n_debug_hash
-#define n_debug_anon_hash   s1->dState->n_debug_anon_hash
-#define debug_info          s1->dState->debug_info
-#define debug_info_root     s1->dState->debug_info_root
-#define dwarf_sym           s1->dState->dwarf_sym
-#define dwarf_line          s1->dState->dwarf_line
-#define dwarf_info          s1->dState->dwarf_info
-#define tcov_data           s1->dState->tcov_data
+#define last_line_num             s1->dState->last_line_num
+#define new_file                  s1->dState->new_file
+#define section_sym               s1->dState->section_sym
+#define debug_next_type           s1->dState->debug_next_type
+#define debug_hash_global         s1->dState->debug_hash_global
+#define debug_hash_local          s1->dState->debug_hash_local
+#define debug_forw_hash_global    s1->dState->debug_forw_hash_global
+#define debug_forw_hash_local     s1->dState->debug_forw_hash_local
+#define n_debug_hash_global       s1->dState->n_debug_hash_global
+#define n_debug_hash_local        s1->dState->n_debug_hash_local
+#define n_debug_forw_hash_global  s1->dState->n_debug_forw_hash_global
+#define n_debug_forw_hash_local   s1->dState->n_debug_forw_hash_local
+#define debug_info                s1->dState->debug_info
+#define debug_info_root           s1->dState->debug_info_root
+#define dwarf_sym                 s1->dState->dwarf_sym
+#define dwarf_line                s1->dState->dwarf_line
+#define dwarf_info                s1->dState->dwarf_info
+#define dwarf_str                 s1->dState->dwarf_str
+#define dwarf_line_str            s1->dState->dwarf_line_str
+#define tcov_data                 s1->dState->tcov_data
 
 #define	FDE_ENCODING        (DW_EH_PE_udata4 | DW_EH_PE_signed | DW_EH_PE_pcrel)
 
@@ -533,19 +554,74 @@ static void dwarf_reloc(Section *s, int sym, int rel)
     put_elf_reloca(symtab_section, s, s->data_offset, rel, sym, 0);
 }
 
+static void free_str(struct dwarf_str_hash **str)
+{
+    int i;
+
+    for (i = 0; i < N_STR_HASH; i++) {
+       while (str[i]) {
+           struct dwarf_str_hash *next = str[i]->next;
+
+           tcc_free(str[i]);
+           str[i] = next;
+       }
+    }
+}
+
+static unsigned str_hash(const char *s)
+{
+    unsigned h = 5381;
+
+    while (*s)
+       h += (*s++ & 0xffu) + h * 31;
+    return h;
+}
+
 static void dwarf_string(Section *s, Section *dw, int sym, const char *str)
 {
     TCCState *s1 = s->s1;
-    int offset, len;
+    int len, hash = str_hash(str) % N_STR_HASH;
     char *ptr;
+    struct dwarf_str_hash *new_hash;
+    struct dwarf_str_hash **dw_hash =
+	dw == dwarf_str_section ? dwarf_str : dwarf_line_str;
 
     len = strlen(str) + 1;
-    offset = dw->data_offset;
-    ptr = section_ptr_add(dw, len);
-    memmove(ptr, str, len);
+    new_hash = dw_hash[hash];
+    while (new_hash) {
+	if (new_hash->len == len &&
+	    !memcmp(str, dw->data + new_hash->data_offset, len))
+	    break;
+	new_hash = new_hash->next;
+    }
+    if (new_hash == NULL) {
+	unsigned long offset = dw->data_offset;
+
+        new_hash = dw_hash[hash];
+        while (new_hash) {
+	    unsigned long n = new_hash->data_offset + new_hash->len - len;
+
+	    if (new_hash->len > len &&
+	        !memcmp(str, dw->data + n, len)) {
+		offset = n;
+		break;
+	    }
+	    new_hash = new_hash->next;
+        }
+	if (new_hash == NULL) {
+	    ptr = section_ptr_add(dw, len);
+	    memmove(ptr, str, len);
+	}
+	new_hash = (struct dwarf_str_hash *)
+	    tcc_malloc(sizeof(struct dwarf_str_hash));
+	new_hash->len = len;
+	new_hash->data_offset = offset;
+	new_hash->next = dw_hash[hash];
+	dw_hash[hash] = new_hash;
+    }
     put_elf_reloca(symtab_section, s, s->data_offset, R_DATA_32DW, sym,
-                   PTR_SIZE == 4 ? 0 : offset);
-    dwarf_data4(s, PTR_SIZE == 4 ? offset : 0);
+                   PTR_SIZE == 4 ? 0 : new_hash->data_offset);
+    dwarf_data4(s, PTR_SIZE == 4 ? new_hash->data_offset : 0);
 }
 
 static void dwarf_strp(Section *s, const char *str)
@@ -1023,13 +1099,22 @@ ST_FUNC void tcc_debug_start(TCCState *s1)
                 SHN_ABS, filename);
 
     if (s1->do_debug) {
+        /* put a "mapping symbol" '$a' for llvm-objdump etc. tools needed
+           to make them disassemble again when crt1.o had a '$d' before */
+        put_elf_sym(symtab_section, text_section->data_offset, 0,
+            ELFW(ST_INFO)(STB_LOCAL, STT_NOTYPE), 0,
+            text_section->sh_num, "$a");
 
         new_file = last_line_num = 0;
         debug_next_type = N_DEFAULT_DEBUG;
-        debug_hash = NULL;
-        debug_anon_hash = NULL;
-        n_debug_hash = 0;
-        n_debug_anon_hash = 0;
+        debug_hash_global = NULL;
+        debug_hash_local = NULL;
+        debug_forw_hash_global = NULL;
+        debug_forw_hash_local = NULL;
+        n_debug_hash_global = 0;
+        n_debug_hash_local = 0;
+        n_debug_forw_hash_global = 0;
+        n_debug_forw_hash_local = 0;
 
         getcwd(buf, sizeof(buf));
 #ifdef _WIN32
@@ -1187,9 +1272,12 @@ ST_FUNC void tcc_debug_start(TCCState *s1)
     }
 }
 
+static void fix_debug_forw_hash(TCCState *s1, int global, int start);
+
 /* put end of translation unit info */
 ST_FUNC void tcc_debug_end(TCCState *s1)
 {
+
     if (!s1->do_debug || debug_next_type == 0)
         return;
 
@@ -1197,32 +1285,14 @@ ST_FUNC void tcc_debug_end(TCCState *s1)
         tcc_debug_funcend(s1, 0); /* free stuff in case of errors */
 
     if (s1->dwarf) {
-	int i, j;
+	int i;
 	int start_aranges;
 	unsigned char *ptr;
 	int text_size = text_section->data_offset;
 
 	/* dwarf_info */
-	for (i = 0; i < n_debug_anon_hash; i++) {
-	    Sym *t = debug_anon_hash[i].type;
-	    int pos = dwarf_info_section->data_offset;
-
-	    dwarf_data1(dwarf_info_section,
-                        IS_UNION (t->type.t) ? DWARF_ABBREV_UNION_EMPTY_TYPE
-                                             : DWARF_ABBREV_STRUCTURE_EMPTY_TYPE);
-            dwarf_strp(dwarf_info_section,
-                       (t->v & ~SYM_STRUCT) >= SYM_FIRST_ANOM
-                       ? "" : get_tok_str(t->v, NULL));
-            dwarf_uleb128(dwarf_info_section, 0);
-            dwarf_uleb128(dwarf_info_section, dwarf_line.cur_file);
-            dwarf_uleb128(dwarf_info_section, file->line_num);
-	    for (j = 0; j < debug_anon_hash[i].n_debug_type; j++)
-		write32le(dwarf_info_section->data +
-			  debug_anon_hash[i].debug_type[j],
-			  pos - dwarf_info.start);
-	    tcc_free (debug_anon_hash[i].debug_type);
-	}
-	tcc_free (debug_anon_hash);
+	fix_debug_forw_hash(s1, 0, 0);
+	fix_debug_forw_hash(s1, 1, 0);
 	dwarf_data1(dwarf_info_section, 0);
 	ptr = dwarf_info_section->data + dwarf_info.start;
 	write32le(ptr, dwarf_info_section->data_offset - dwarf_info.start - 4);
@@ -1323,7 +1393,12 @@ ST_FUNC void tcc_debug_end(TCCState *s1)
         put_stabs_r(s1, NULL, N_SO, 0, 0,
                     text_section->data_offset, text_section, section_sym);
     }
-    tcc_free(debug_hash);
+    free_str (dwarf_str);
+    free_str (dwarf_line_str);
+    tcc_free (debug_forw_hash_global);
+    tcc_free (debug_forw_hash_local);
+    tcc_free(debug_hash_global);
+    tcc_free(debug_hash_local);
     debug_next_type = 0;
 }
 
@@ -1425,6 +1500,8 @@ ST_FUNC void tcc_debug_line(TCCState *s1)
 		else {
 	            dwarf_line_op(s1, DW_LNS_advance_line);
 		    dwarf_sleb128_op(s1, len_line);
+                    /* advance by nothing */
+	            dwarf_line_op(s1, DWARF_OPCODE_BASE - DWARF_LINE_BASE);
 		}
 	    }
 	}
@@ -1468,6 +1545,36 @@ static void tcc_debug_stabs (TCCState *s1, const char *str, int type, unsigned l
         put_stabs (s1, str, type, 0, 0, value);
 }
 
+static void fix_debug_forw_hash(TCCState *s1, int global, int start)
+{
+    if (s1->dwarf) {
+        int i, j, n_hash = global
+		    ? n_debug_forw_hash_global : n_debug_forw_hash_local;
+	struct _debug_forw_hash *hash = global
+	  ? debug_forw_hash_global : debug_forw_hash_local;
+
+	for (i = start; i < n_hash; i++) {
+	    Sym *t = hash[i].type;
+	    int pos = dwarf_info_section->data_offset;
+
+	    dwarf_data1(dwarf_info_section,
+                        IS_UNION (t->type.t) ? DWARF_ABBREV_UNION_EMPTY_TYPE
+                                             : DWARF_ABBREV_STRUCTURE_EMPTY_TYPE);
+            dwarf_strp(dwarf_info_section,
+                       (t->v & ~SYM_STRUCT) >= SYM_FIRST_ANOM
+                       ? "" : get_tok_str(t->v, NULL));
+            dwarf_uleb128(dwarf_info_section, 0);
+            dwarf_uleb128(dwarf_info_section, dwarf_line.cur_file);
+            dwarf_uleb128(dwarf_info_section, file->line_num);
+	    for (j = 0; j < hash[i].n_debug_type; j++)
+		write32le(dwarf_info_section->data +
+			  hash[i].debug_type[j],
+			  pos - dwarf_info.start);
+	    tcc_free (hash[i].debug_type);
+	}
+    }
+}
+
 ST_FUNC void tcc_debug_stabn(TCCState *s1, int type, int value)
 {
     if (!s1->do_debug)
@@ -1477,6 +1584,8 @@ ST_FUNC void tcc_debug_stabn(TCCState *s1, int type, int value)
             (struct _debug_info *) tcc_mallocz(sizeof (*info));
 
         info->start = value;
+        info->last_debug_hash = n_debug_hash_local;
+        info->last_debug_forw_hash = n_debug_forw_hash_local;
         info->parent = debug_info;
         if (debug_info) {
             if (debug_info->child) {
@@ -1494,109 +1603,171 @@ ST_FUNC void tcc_debug_stabn(TCCState *s1, int type, int value)
         debug_info = info;
     }
     else {
+	fix_debug_forw_hash(s1, 0, debug_info->last_debug_forw_hash);
+        n_debug_hash_local = debug_info->last_debug_hash;
+        n_debug_forw_hash_local = debug_info->last_debug_forw_hash;
         debug_info->end = value;
         debug_info = debug_info->parent;
     }
 }
 
+static int check_global(Sym *t)
+{
+    Sym *g = local_stack;
+
+    while (g) {
+	if (t == g)
+	    return 0;
+	g = g->prev;
+    }
+    return 1;
+}
+
 static int tcc_debug_find(TCCState *s1, Sym *t, int dwarf)
 {
-    int i;
+    int i , g = check_global(t);
+    int n_hash, *n_forw_hash;
+    struct _debug_hash *hash;
+    struct _debug_forw_hash **forw_hash;
 
-    if (!debug_info && dwarf &&
-	(t->type.t & VT_BTYPE) == VT_STRUCT && t->c == -1) {
-	for (i = 0; i < n_debug_anon_hash; i++)
-            if (t == debug_anon_hash[i].type)
+    if ((t->type.t & VT_BTYPE) == VT_STRUCT && t->c == -1) {
+        forw_hash = g ? &debug_forw_hash_global : &debug_forw_hash_local;
+        n_forw_hash = g ? &n_debug_forw_hash_global : &n_debug_forw_hash_local;
+	for (i = 0; i < *n_forw_hash; i++)
+            if (t == (*forw_hash)[i].type)
 		return 0;
-	debug_anon_hash = (struct _debug_anon_hash *)
-            tcc_realloc (debug_anon_hash,
-                         (n_debug_anon_hash + 1) * sizeof(*debug_anon_hash));
-        debug_anon_hash[n_debug_anon_hash].n_debug_type = 0;
-        debug_anon_hash[n_debug_anon_hash].debug_type = NULL;
-        debug_anon_hash[n_debug_anon_hash++].type = t;
+	*forw_hash = (struct _debug_forw_hash *)
+            tcc_realloc (*forw_hash,
+                         (*n_forw_hash + 1) * sizeof(**forw_hash));
+        (*forw_hash)[*n_forw_hash].n_debug_type = 0;
+        (*forw_hash)[*n_forw_hash].debug_type = NULL;
+        (*forw_hash)[(*n_forw_hash)++].type = t;
 	return 0;
     }
-    for (i = 0; i < n_debug_hash; i++)
-        if (t == debug_hash[i].type)
-	    return debug_hash[i].debug_type;
+    hash = g ? debug_hash_global : debug_hash_local;
+    n_hash = g ? n_debug_hash_global : n_debug_hash_local;
+    for (i = 0; i < n_hash; i++)
+        if (t == hash[i].type)
+	    return hash[i].debug_type;
     return -1;
 }
 
 static int tcc_get_dwarf_info(TCCState *s1, Sym *s);
 
-static void tcc_debug_check_anon(TCCState *s1, Sym *t, int debug_type)
+static void tcc_debug_check_forw(TCCState *s1, Sym *t, int debug_type)
 {
-    int i;
+    if ((t->type.t & VT_BTYPE) == VT_STRUCT && t->type.ref->c == -1) {
+        int i, j, g = check_global(t);
+        int n_forw_hash;
+        struct _debug_forw_hash **forw_hash;
 
-    if (!debug_info && (t->type.t & VT_BTYPE) == VT_STRUCT && t->type.ref->c == -1)
-	for (i = 0; i < n_debug_anon_hash; i++)
-            if (t->type.ref == debug_anon_hash[i].type) {
-		debug_anon_hash[i].debug_type =
-		    tcc_realloc(debug_anon_hash[i].debug_type,
-				(debug_anon_hash[i].n_debug_type + 1) * sizeof(int));
-		debug_anon_hash[i].debug_type[debug_anon_hash[i].n_debug_type++] =
-		    debug_type;
-            }
+	for (i = g; i <= 1; i++) {
+            forw_hash = i ? &debug_forw_hash_global : &debug_forw_hash_local;
+            n_forw_hash = i ? n_debug_forw_hash_global : n_debug_forw_hash_local;
+	    for (j = 0; j < n_forw_hash; j++)
+                if (t->type.ref == (*forw_hash)[j].type) {
+		    (*forw_hash)[j].debug_type =
+		        tcc_realloc((*forw_hash)[j].debug_type,
+				    ((*forw_hash)[j].n_debug_type + 1) * sizeof(int));
+		    (*forw_hash)[j].debug_type[(*forw_hash)[j].n_debug_type++] =
+		        debug_type;
+		    return;
+                }
+	}
+    }
 }
 
-ST_FUNC void tcc_debug_fix_anon(TCCState *s1, CType *t)
+static void stabs_struct_complete(TCCState *s1, CType *t);
+
+ST_FUNC void tcc_debug_fix_forw(TCCState *s1, CType *t)
 {
-    int i, j, debug_type;
-
-    if (!(s1->do_debug & 2) || !s1->dwarf || debug_info)
+    if (!(s1->do_debug & 2))
 	return;
+    if (0 == s1->dwarf) {
+        stabs_struct_complete(s1, t);
+        return;
+    }
+    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref->c != -1) {
+        int i, j, debug_type, g = check_global(t->ref);
+        int *n_forw_hash;
+        struct _debug_forw_hash **forw_hash;
+        forw_hash = g ? &debug_forw_hash_global : &debug_forw_hash_local;
+        n_forw_hash = g ? &n_debug_forw_hash_global : &n_debug_forw_hash_local;
+	for (i = 0; i < *n_forw_hash; i++)
+	    if (t->ref == (*forw_hash)[i].type) {
+		if (s1->dwarf) {
+		    Sym sym = {0}; sym .type = *t ;
 
-    if ((t->t & VT_BTYPE) == VT_STRUCT && t->ref->c != -1)
-	for (i = 0; i < n_debug_anon_hash; i++)
-	    if (t->ref == debug_anon_hash[i].type) {
-		Sym sym = {0}; sym .type = *t ;
-
-		/* Trick to not hash this struct */
-		debug_info = (struct _debug_info *) t;
-		debug_type = tcc_get_dwarf_info(s1, &sym);
-		debug_info = NULL;
-		for (j = 0; j < debug_anon_hash[i].n_debug_type; j++)
-		    write32le(dwarf_info_section->data +
-			      debug_anon_hash[i].debug_type[j],
-			      debug_type - dwarf_info.start);
-		tcc_free(debug_anon_hash[i].debug_type);
-		n_debug_anon_hash--;
-		for (; i < n_debug_anon_hash; i++)
-		    debug_anon_hash[i] = debug_anon_hash[i + 1];
+		    debug_type = tcc_get_dwarf_info(s1, &sym);
+		    for (j = 0; j < (*forw_hash)[i].n_debug_type; j++)
+		        write32le(dwarf_info_section->data +
+			          (*forw_hash)[i].debug_type[j],
+			          debug_type - dwarf_info.start);
+		    tcc_free((*forw_hash)[i].debug_type);
+		}
+		(*n_forw_hash)--;
+		for (; i < *n_forw_hash; i++)
+		    (*forw_hash)[i] = (*forw_hash)[i + 1];
 	    }
+    }
 }
 
 static int tcc_debug_add(TCCState *s1, Sym *t, int dwarf)
 {
     int offset = dwarf ? dwarf_info_section->data_offset : ++debug_next_type;
-    debug_hash = (struct _debug_hash *)
-	tcc_realloc (debug_hash,
-		     (n_debug_hash + 1) * sizeof(*debug_hash));
-    debug_hash[n_debug_hash].debug_type = offset;
-    debug_hash[n_debug_hash++].type = t;
+    int *n_hash, g = check_global(t);
+    struct _debug_hash **hash;
+
+    hash = g ? &debug_hash_global : &debug_hash_local;
+    n_hash = g ? &n_debug_hash_global : &n_debug_hash_local;
+    *hash = (struct _debug_hash *)
+	tcc_realloc (*hash,
+		     (*n_hash + 1) * sizeof(**hash));
+    (*hash)[*n_hash].debug_type = offset;
+    (*hash)[(*n_hash)++].type = t;
     return offset;
 }
 
-static void tcc_debug_remove(TCCState *s1, Sym *t)
+static int STRUCT_NODEBUG(Sym *s)
 {
-    int i;
-
-    for (i = 0; i < n_debug_hash; i++)
-        if (t == debug_hash[i].type) {
-	    n_debug_hash--;
-	    for (; i < n_debug_hash; i++)
-		debug_hash[i] = debug_hash[i+1];
-	}
+    return
+    (s->a.nodebug ||
+     ((s->v & ~SYM_FIELD) >= SYM_FIRST_ANOM &&
+      ((s->type.t & VT_BTYPE) == VT_BYTE ||
+       (s->type.t & VT_BTYPE) == VT_BOOL ||
+       (s->type.t & VT_BTYPE) == VT_SHORT ||
+       (s->type.t & VT_BTYPE) == VT_INT ||
+       (s->type.t & VT_BTYPE) == VT_LLONG)));
 }
 
-#define	STRUCT_NODEBUG(s) 			       \
-    (s->a.nodebug ||                           \
-     ((s->v & ~SYM_FIELD) >= SYM_FIRST_ANOM && \
-      ((s->type.t & VT_BTYPE) == VT_BYTE ||    \
-       (s->type.t & VT_BTYPE) == VT_BOOL ||    \
-       (s->type.t & VT_BTYPE) == VT_SHORT ||   \
-       (s->type.t & VT_BTYPE) == VT_INT ||     \
-       (s->type.t & VT_BTYPE) == VT_LLONG)))
+static int stabs_struct_find(TCCState *s1, Sym *t, int *p_id)
+{
+    /* A struct/enum has a ref to its type but that type has no ref.
+       So we can (ab)use it for some info.  Here:
+         s->c : stabs type id
+         s->r : already defined in stabs */
+    Sym *s = t->type.ref;
+/*
+    if (s && s->v != (SYM_FIELD|0x00DEBBED)) {
+        tcc_error_noabort("tccdbg: internal error: %s", get_tok_str(t->v, 0));
+        if (p_id)
+            *p_id = 0;
+        return 0;
+    }
+*/
+    if (NULL == p_id)
+        return s && !s->r && t->c >= 0;
+    if (NULL == s) {
+        /* just use global_stack always */
+        s = sym_push2(&global_stack, SYM_FIELD|0x00DEBBED, 0, ++debug_next_type);
+        t->type.ref = s;
+    }
+    *p_id = s->c;
+    if (s->r || t->c < 0) /* already defined or still incomplete */
+        return 0;
+    s->r = 1;
+    return 1;
+}
 
 static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
 {
@@ -1616,12 +1787,8 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
             break;
     }
     if ((type & VT_BTYPE) == VT_STRUCT) {
-	Sym *e = t;
-
         t = t->type.ref;
-	debug_type = tcc_debug_find(s1, t, 0);
-        if (debug_type == -1) {
-            debug_type = tcc_debug_add(s1, t, 0);
+        if (stabs_struct_find(s1, t, &debug_type)) {
             cstr_new (&str);
             cstr_printf (&str, "%s:T%d=%c%d",
                          (t->v & ~SYM_STRUCT) >= SYM_FIRST_ANOM
@@ -1629,14 +1796,16 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
                          debug_type,
                          IS_UNION (t->type.t) ? 'u' : 's',
                          t->c);
+
             while (t->next) {
                 int pos, size, align;
-
                 t = t->next;
 		if (STRUCT_NODEBUG(t))
 		    continue;
                 cstr_printf (&str, "%s:",
-                             get_tok_str(t->v, NULL));
+                             (t->v & ~SYM_FIELD) >= SYM_FIRST_ANOM
+                             ? "" : get_tok_str(t->v, NULL)
+                             );
                 tcc_get_debug_info (s1, t, &str);
                 if (t->type.t & VT_BITFIELD) {
                     pos = t->c * 8 + BIT_POS(t->type.t);
@@ -1651,16 +1820,11 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
             cstr_printf (&str, ";");
             tcc_debug_stabs(s1, str.data, N_LSYM, 0, NULL, 0, 0);
             cstr_free (&str);
-            if (debug_info)
-                tcc_debug_remove(s1, e);
         }
     }
     else if (IS_ENUM(type)) {
         Sym *e = t = t->type.ref;
-
-	debug_type = tcc_debug_find(s1, t, 0);
-	if (debug_type == -1) {
-	    debug_type = tcc_debug_add(s1, t, 0);
+        if (stabs_struct_find(s1, t, &debug_type)) {
             cstr_new (&str);
             cstr_printf (&str, "%s:T%d=e",
                          (t->v & ~SYM_STRUCT) >= SYM_FIRST_ANOM
@@ -1677,8 +1841,6 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
             cstr_printf (&str, ";");
             tcc_debug_stabs(s1, str.data, N_LSYM, 0, NULL, 0, 0);
             cstr_free (&str);
-            if (debug_info)
-                tcc_debug_remove(s1, e);
 	}
     }
     else if ((type & VT_BTYPE) != VT_FUNC) {
@@ -1689,6 +1851,10 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
         if (debug_type > N_DEFAULT_DEBUG)
             return;
     }
+
+    if (NULL == result) /* from stabs_struct_complete() */
+        return;
+
     if (n > 0)
         cstr_printf (result, "%d=", ++debug_next_type);
     t = s;
@@ -1711,6 +1877,14 @@ static void tcc_get_debug_info(TCCState *s1, Sym *s, CString *result)
         t = t->type.ref;
     }
     cstr_printf (result, "%d", debug_type);
+}
+
+static void stabs_struct_complete(TCCState *s1, CType *t)
+{
+    if (stabs_struct_find(s1, t->ref, NULL)) {
+        Sym s = {0}; s.type = *t;
+        tcc_get_debug_info(s1, &s, NULL);
+    }
 }
 
 static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
@@ -1802,13 +1976,11 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 		if (STRUCT_NODEBUG(e))
 		    continue;
 		type = tcc_get_dwarf_info(s1, e);
-		tcc_debug_check_anon(s1, e, pos_type[i]);
+		tcc_debug_check_forw(s1, e, pos_type[i]);
 		write32le(dwarf_info_section->data + pos_type[i++],
 			  type - dwarf_info.start);
 	    }
 	    tcc_free(pos_type);
-	    if (debug_info)
-		tcc_debug_remove(s1, t);
         }
     }
     else if (IS_ENUM(type)) {
@@ -1849,8 +2021,6 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    dwarf_data1(dwarf_info_section, 0);
 	    write32le(dwarf_info_section->data + pos_sib,
 		      dwarf_info_section->data_offset - dwarf_info.start);
-	    if (debug_info)
-		tcc_debug_remove(s1, t);
 	}
     }
     else if ((type & VT_BTYPE) != VT_FUNC) {
@@ -1868,7 +2038,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    dwarf_data1(dwarf_info_section, DWARF_ABBREV_BASE_TYPE);
 	    dwarf_uleb128(dwarf_info_section, default_debug[i - 1].size);
 	    dwarf_data1(dwarf_info_section, default_debug[i - 1].encoding);
-	    strncpy(name, default_debug[i - 1].name, sizeof(name) -1);
+	    pstrcpy(name, sizeof name, default_debug[i - 1].name);
 	    *strchr(name, ':') = 0;
 	    dwarf_strp(dwarf_info_section, name);
 	    dwarf_info.base_type_used[i - 1] = debug_type;
@@ -1888,7 +2058,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    dwarf_data1(dwarf_info_section, DWARF_ABBREV_POINTER);
 	    dwarf_data1(dwarf_info_section, PTR_SIZE);
 	    if (last_pos != -1) {
-		tcc_debug_check_anon(s1, e, last_pos);
+		tcc_debug_check_forw(s1, e, last_pos);
 		write32le(dwarf_info_section->data + last_pos,
 			  i - dwarf_info.start);
 	    }
@@ -1910,7 +2080,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 		retval = i;
 	    dwarf_data1(dwarf_info_section, DWARF_ABBREV_ARRAY_TYPE);
 	    if (last_pos != -1) {
-		tcc_debug_check_anon(s1, e, last_pos);
+		tcc_debug_check_forw(s1, e, last_pos);
 		write32le(dwarf_info_section->data + last_pos,
 			  i - dwarf_info.start);
 	    }
@@ -1945,7 +2115,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 			t->type.ref->next ? DWARF_ABBREV_SUBROUTINE_TYPE
 					  : DWARF_ABBREV_SUBROUTINE_EMPTY_TYPE);
 	    if (last_pos != -1) {
-		tcc_debug_check_anon(s1, e, last_pos);
+		tcc_debug_check_forw(s1, e, last_pos);
 		write32le(dwarf_info_section->data + last_pos,
 			  i - dwarf_info.start);
 	    }
@@ -1981,7 +2151,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    while (f->next) {
 		f = f->next;
 		type = tcc_get_dwarf_info(s1, f);
-		tcc_debug_check_anon(s1, f, pos_type[i]);
+		tcc_debug_check_forw(s1, f, pos_type[i]);
 	        write32le(dwarf_info_section->data + pos_type[i++],
                           type - dwarf_info.start);
 	    }
@@ -1989,7 +2159,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
         }
         else {
 	    if (last_pos != -1) {
-		tcc_debug_check_anon(s1, e, last_pos);
+		tcc_debug_check_forw(s1, e, last_pos);
 		write32le(dwarf_info_section->data + last_pos,
 			  debug_type - dwarf_info.start);
 	    }
@@ -2041,9 +2211,9 @@ static void tcc_debug_finish (TCCState *s1, struct _debug_info *cur)
 		}
 		else {
 		    /* param/local */
-                    dwarf_data1(dwarf_info_section, dwarf_sleb128_size(s->value) + 1);
+                    dwarf_data1(dwarf_info_section, dwarf_sleb128_size((long)s->value) + 1);
                     dwarf_data1(dwarf_info_section, DW_OP_fbreg);
-                    dwarf_sleb128(dwarf_info_section, s->value);
+                    dwarf_sleb128(dwarf_info_section, (long)s->value);
 		}
 		tcc_free (s->str);
             }
@@ -2085,14 +2255,16 @@ static void tcc_debug_finish (TCCState *s1, struct _debug_info *cur)
     }
 }
 
-ST_FUNC void tcc_add_debug_info(TCCState *s1, int param, Sym *s, Sym *e)
+ST_FUNC void tcc_add_debug_info(TCCState *s1, Sym *s, Sym *e)
 {
     CString debug_str;
+    int param;
 
     if (!(s1->do_debug & 2))
         return;
 
     cstr_new (&debug_str);
+    param = !e;
     for (; s != e; s = s->prev) {
         if (!s->v || (s->r & VT_VALMASK) != VT_LOCAL)
             continue;
@@ -2194,7 +2366,7 @@ ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
         dwarf_strp(dwarf_info_section, funcname);
         dwarf_uleb128(dwarf_info_section, dwarf_line.cur_file);
         dwarf_uleb128(dwarf_info_section, dwarf_info.line);
-	tcc_debug_check_anon(s1, sym->type.ref, dwarf_info_section->data_offset);
+	tcc_debug_check_forw(s1, sym->type.ref, dwarf_info_section->data_offset);
         dwarf_data4(dwarf_info_section, n_debug_info - dwarf_info.start);
         dwarf_reloc(dwarf_info_section, section_sym, R_DATA_PTR);
 #if PTR_SIZE == 4
@@ -2251,7 +2423,7 @@ ST_FUNC void tcc_debug_extern_sym(TCCState *s1, Sym *sym, int sh_num, int sym_bi
 	dwarf_strp(dwarf_info_section, get_tok_str(sym->v, NULL));
 	dwarf_uleb128(dwarf_info_section, dwarf_line.cur_file);
 	dwarf_uleb128(dwarf_info_section, file->line_num);
-	tcc_debug_check_anon(s1, sym, dwarf_info_section->data_offset);
+	tcc_debug_check_forw(s1, sym, dwarf_info_section->data_offset);
 	dwarf_data4(dwarf_info_section, debug_type - dwarf_info.start);
 	if (sym_bind == STB_GLOBAL)
 	    dwarf_data1(dwarf_info_section, 1);
@@ -2301,7 +2473,7 @@ ST_FUNC void tcc_debug_typedef(TCCState *s1, Sym *sym)
 	    dwarf_strp(dwarf_info_section, get_tok_str(sym->v, NULL));
 	    dwarf_uleb128(dwarf_info_section, dwarf_line.cur_file);
 	    dwarf_uleb128(dwarf_info_section, file->line_num);
-	    tcc_debug_check_anon(s1, sym, dwarf_info_section->data_offset);
+	    tcc_debug_check_forw(s1, sym, dwarf_info_section->data_offset);
 	    dwarf_data4(dwarf_info_section, debug_type - dwarf_info.start);
 	}
     }
@@ -2309,9 +2481,7 @@ ST_FUNC void tcc_debug_typedef(TCCState *s1, Sym *sym)
     {
         CString str;
         cstr_new (&str);
-        cstr_printf (&str, "%s:t",
-                     (sym->v & ~SYM_FIELD) >= SYM_FIRST_ANOM
-                     ? "" : get_tok_str(sym->v, NULL));
+        cstr_printf (&str, "%s:t", get_tok_str(sym->v, NULL));
         tcc_get_debug_info(s1, sym, &str);
         tcc_debug_stabs(s1, str.data, N_LSYM, 0, NULL, 0, 0);
         cstr_free (&str);
@@ -2470,13 +2640,19 @@ ST_FUNC void tcc_tcov_reset_ind(TCCState *s1)
 #undef new_file
 #undef section_sym
 #undef debug_next_type
-#undef debug_hash
-#undef n_debug_hash
-#undef debug_anon_hash
-#undef n_debug_anon_hash
+#undef debug_hash_global
+#undef debug_hash_local
+#undef n_debug_hash_global
+#undef n_debug_hash_local
+#undef debug_forw_hash_global
+#undef debug_forw_hash_local
+#undef n_debug_forw_hash_global
+#undef n_debug_forw_hash_local
 #undef debug_info
 #undef debug_info_root
 #undef dwarf_sym
 #undef dwarf_line
 #undef dwarf_info
+#undef dwarf_str
+#undef dwarf_line_str
 #undef tcov_data

@@ -13,27 +13,27 @@
 .globl _(alloca), _(__alloca)
 _(alloca):
 _(__alloca):
-    push    %ebp
-    mov     %esp,%ebp
-    mov     8(%ebp),%eax
+    pop     %edx
+    pop     %eax
     add     $3,%eax
     and     $-4,%eax
+    jz      p3
+
 #ifdef _WIN32
-    jmp     .+16 #p2
 p1:
+    cmp     $4096,%eax
+    jb      p2
+    test    %eax,-4096(%esp)
     sub     $4096,%esp
     sub     $4096,%eax
-    test    %eax,(%esp)
+    jmp     p1
 p2:
-    cmp     $4096,%eax
-    jae     p1
 #endif
     sub     %eax,%esp
-    mov     4(%ebp),%eax
-    mov     0(%ebp),%ebp
-    add     $8,%esp
-    push    %eax
-    lea     8(%esp),%eax
+    mov     %esp,%eax
+p3:
+    push    %edx
+    push    %edx
     ret
 
 /* ---------------------------------------------- */
@@ -54,7 +54,7 @@ _(alloca):
 #ifdef _WIN32
 p1:
     cmp     $4096,%rax
-    jbe     p2
+    jb      p2
     test    %rax,-4096(%rsp)
     sub     $4096,%rsp
     sub     $4096,%rax

@@ -406,6 +406,8 @@ ST_FUNC void gfunc_call(int nb_args)
         gbound_args(nb_args);
 #endif
 
+    save_regs(nb_args + 1);
+
     args_size = 0;
     for(i = 0;i < nb_args; i++) {
         if ((vtop->type.t & VT_BTYPE) == VT_STRUCT) {
@@ -415,6 +417,7 @@ ST_FUNC void gfunc_call(int nb_args)
             /* allocate the necessary size on stack */
 #ifdef TCC_TARGET_PE
             if (size >= 4096) {
+                save_reg(TREG_EDX);
                 r = get_reg(RC_EAX);
                 oad(0x68, size); // push size
                 /* cannot call normal 'alloca' with bound checking */
@@ -463,7 +466,7 @@ ST_FUNC void gfunc_call(int nb_args)
         }
         vtop--;
     }
-    save_regs(0); /* save used temporary registers */
+
     func_sym = vtop->type.ref;
     func_call = func_sym->f.func_call;
     /* fast call case */
@@ -575,8 +578,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             param_addr = addr;
             addr += size;
         }
-        sym_push(sym->v & ~SYM_FIELD, type,
-                 VT_LOCAL | VT_LVAL, param_addr);
+        gfunc_set_param(sym, param_addr, 0);
         param_index++;
     }
     func_ret_sub = 0;

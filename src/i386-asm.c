@@ -136,7 +136,7 @@ enum {
 # define OP_EA32  0
 #endif
 
-#define OP_EA     0x40000000
+#define OP_EA     0x40000000u
 #define OP_REG    (OP_REG8 | OP_REG16 | OP_REG32 | OP_REG64)
 
 #ifdef TCC_TARGET_X86_64
@@ -722,7 +722,7 @@ ST_FUNC void asm_opcode(TCCState *s1, int opcode)
         }
         parse_operand(s1, pop);
         if (tok == ':') {
-           if (pop->type != OP_SEG || seg_prefix)
+           if (!(pop->type & OP_SEG) || seg_prefix)
                tcc_error("incorrect prefix");
            seg_prefix = segment_prefixes[pop->reg];
            next();
@@ -852,7 +852,7 @@ again:
         if (opcode >= TOK_ASM_first && opcode <= TOK_ASM_last) {
             int b;
             b = op0_codes[opcode - TOK_ASM_first];
-            if (b & 0xff00) 
+            if (b & 0xff00)
                 g(b >> 8);
             g(b);
             return;
@@ -1002,21 +1002,24 @@ again:
     modrm_index = -1;
     modreg_index = -1;
     if (pa->instr_type & OPC_MODRM) {
-#ifdef TCC_TARGET_X86_64
 	if (!nb_ops) {
 	    /* A modrm opcode without operands is a special case (e.g. mfence).
 	       It has a group and acts as if there's an register operand 0 */
 	    i = 0;
 	    ops[i].type = OP_REG;
+#ifdef TCC_TARGET_X86_64
 	    if (pa->sym == TOK_ASM_endbr64)
 	      ops[i].reg = 2; // dx
 	    else if (pa->sym >= TOK_ASM_lfence && pa->sym <= TOK_ASM_sfence)
   	      ops[i].reg = 0; // ax
+#else
+	    if (pa->sym == TOK_ASM_endbr32)
+	      ops[i].reg = 3; // bx
+#endif
 	    else
 	      tcc_error("bad MODR/M opcode without operands");
 	    goto modrm_found;
 	}
-#endif
         /* first look for an ea operand */
         for(i = 0;i < nb_ops; i++) {
             if (op_type[i] & OP_EA)
@@ -1230,8 +1233,8 @@ static const char *skip_constraint_modifiers(const char *p)
     return p;
 }
 
-/* If T (a token) is of the form "%reg" returns the register
-   number and type, otherwise return -1.  */
+/* If t (a token) is of the form "%reg" or "reg" return the register number and
+   type, otherwise return -1. With GCC the % is optional, too. */
 ST_FUNC int asm_parse_regvar (int t)
 {
     const char *s;
@@ -1239,13 +1242,14 @@ ST_FUNC int asm_parse_regvar (int t)
     if (t < TOK_IDENT || (t & SYM_FIELD))
         return -1;
     s = table_ident[t - TOK_IDENT]->str;
-    if (s[0] != '%')
-        return -1;
-    t = tok_alloc_const(s + 1);
+    if (s[0] == '%')
+        ++s;
+    t = tok_alloc_const(s);
     unget_tok(t);
+    /* Internally the % prefix is required. */
     unget_tok('%');
     parse_operand(tcc_state, &op);
-    /* Accept only integer regs for now.  */
+    /* Accept only integer regs for now. */
     if (op.type & OP_REG)
         return op.reg;
     else
@@ -1413,7 +1417,7 @@ ST_FUNC void asm_compute_constraints(ASMOperand *operands,
             /* any general register */
             if ((reg = op->reg) >= 0)
                 goto reg_found;
-            else for(reg = 0; reg < 8; reg++) {
+            else for(reg = 0; reg < NB_ASM_REGS; reg++) {
                 if (!is_reg_allocated(reg))
                     goto reg_found;
             }
@@ -1448,7 +1452,7 @@ ST_FUNC void asm_compute_constraints(ASMOperand *operands,
             if (j < nb_outputs || c == 'm') {
                 if ((op->vt->r & VT_VALMASK) == VT_LLOCAL) {
                     /* any general register */
-                    for(reg = 0; reg < 8; reg++) {
+                    for(reg = 0; reg < NB_ASM_REGS; reg++) {
                         if (!(regs_allocated[reg] & REG_IN_MASK))
                             goto reg_found1;
                     }
@@ -1481,7 +1485,7 @@ ST_FUNC void asm_compute_constraints(ASMOperand *operands,
         if (op->reg >= 0 &&
             (op->vt->r & VT_VALMASK) == VT_LLOCAL  &&
             !op->is_memory) {
-            for(reg = 0; reg < 8; reg++) {
+            for(reg = 0; reg < NB_ASM_REGS; reg++) {
                 if (!(regs_allocated[reg] & REG_OUT_MASK))
                     goto reg_found2;
             }

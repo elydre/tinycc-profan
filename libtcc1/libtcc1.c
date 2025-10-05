@@ -626,12 +626,6 @@ long long __fixxfdi (long double a1)
 }
 #endif /* !ARM */
 
-#if defined __x86_64__
-/* float constants used for unary minus operation */
-const float __mzerosf = -0.0;
-const double __mzerodf = -0.0;
-#endif
-
 #if defined _WIN64
 /* MSVC x64 intrinsic */
 void __faststorefence(void)
